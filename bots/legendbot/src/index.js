@@ -58,10 +58,12 @@ function saveJson(file, value) {
   fs.writeFileSync(file, JSON.stringify(value, null, 2));
 }
 
-// data.json shape: { date: 'YYYY-MM-DD', entries: { [userId]: entry } }
-let data = loadJson(DATA_FILE, { date: todayKey(), entries: {} });
-// board.json shape: { messageId, channelId, notifiedSessions: { [game]: true } }
-let boardState = loadJson(BOARD_STATE_FILE, { messageId: null, channelId: BOARD_CHANNEL_ID, notifiedSessions: {} });
+// data.json shape: { date, entries: { [userId]: entry }, ratings: { [sessionId]: {...} } }
+let data = loadJson(DATA_FILE, { date: todayKey(), entries: {}, ratings: {} });
+if (!data.ratings) data.ratings = {};
+// board.json shape: { messageId, channelId, notifiedSessions, liveSessions }
+let boardState = loadJson(BOARD_STATE_FILE, { messageId: null, channelId: BOARD_CHANNEL_ID, notifiedSessions: {}, liveSessions: {} });
+if (!boardState.liveSessions) boardState.liveSessions = {};
 
 function todayKey() {
   const d = new Date();
@@ -370,8 +372,10 @@ async function sendDailyPing() {
 function ensureFreshDay(forceReset = false) {
   const today = todayKey();
   if (forceReset || data.date !== today) {
-    data = { date: today, entries: {} };
+    const preservedRatings = data.ratings || {};
+    data = { date: today, entries: {}, ratings: preservedRatings };
     boardState.notifiedSessions = {};
+    boardState.liveSessions = {};
     sessions.clear();
     persistData();
     persistBoard();
@@ -497,28 +501,224 @@ async function refreshBoard() {
   }
 }
 
-async function checkSessionFormingNotifications() {
+// ===== Live session lifecycle (Phases 2-4) =====
+function anchorDate(dateKey) {
+  const [y, m, d] = dateKey.split('-').map(Number);
+  return new Date(y, m - 1, d, 0, 0, 0, 0);
+}
+function sessionStartDate(ls) {
+  return new Date(anchorDate(ls.date).getTime() + ls.startHour * 3600 * 1000);
+}
+function sessionActualEndHour(ls) {
+  // End = latest 'latestHour' among confirmed players who have entries; fallback to ls.endHour.
+  const byId = data.entries;
+  const ends = ls.confirmed.map((u) => byId[u]?.latestHour).filter((h) => typeof h === 'number');
+  if (!ends.length) return ls.endHour;
+  return Math.max(...ends);
+}
+function sessionActualEndDate(ls) {
+  return new Date(anchorDate(ls.date).getTime() + sessionActualEndHour(ls) * 3600 * 1000);
+}
+
+function buildSessionCardContent(ls) {
+  const byId = data.entries;
+  const filledRoles = new Set();
+  for (const uid of ls.confirmed) {
+    const e = byId[uid];
+    if (e && e.role && e.role !== 'fill') filledRoles.add(e.role);
+  }
+  const roleLine = ROLES
+    .filter((r) => r.id !== 'fill')
+    .map((r) => `${filledRoles.has(r.id) ? '✅' : '⚠️'} ${r.label}`)
+    .join(' · ');
+  const confMentions = ls.confirmed.length ? ls.confirmed.map((u) => `<@${u}>`).join(' ') : '_nobody yet_';
+  const lateLine = ls.late.length ? ls.late.map((u) => `<@${u}>`).join(' ') : '_nobody_';
+  const outLine = ls.cantMake.length ? ls.cantMake.map((u) => `<@${u}>`).join(' ') : '_nobody_';
+  return [
+    `👑 **Session locked in!** **${ls.game}** — Tonight **${formatHour(ls.startHour)} to ${formatHour(sessionActualEndHour(ls))}**`,
+    `${confMentions} are all down!`,
+    `**Roles:** ${roleLine}`,
+    '',
+    `✅ **Confirmed (${ls.confirmed.length}):** ${confMentions}`,
+    `👀 **Joining late (${ls.late.length}):** ${lateLine}`,
+    `😴 **Can't make it (${ls.cantMake.length}):** ${outLine}`,
+  ].join('\n');
+}
+
+function buildSessionRow(ls) {
+  return new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`sess:in:${ls.id}`).setLabel("✅ I'm in — confirm me").setStyle(ButtonStyle.Success),
+    new ButtonBuilder().setCustomId(`sess:late:${ls.id}`).setLabel("👀 I'll be joining late").setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`sess:out:${ls.id}`).setLabel("😴 Can't make it").setStyle(ButtonStyle.Secondary),
+  );
+}
+
+async function fetchSessionMessage(ls) {
+  const channel = await client.channels.fetch(ls.channelId).catch(() => null);
+  if (!channel || !ls.messageId) return { channel, msg: null };
+  const msg = await channel.messages.fetch(ls.messageId).catch(() => null);
+  return { channel, msg };
+}
+
+async function updateSessionCard(ls) {
+  const { msg } = await fetchSessionMessage(ls);
+  if (!msg) return;
+  await msg.edit({
+    content: buildSessionCardContent(ls),
+    components: ls.fellApart || ls.endedPosted ? [] : [buildSessionRow(ls)],
+    allowedMentions: { users: [...ls.confirmed, ...ls.late] },
+  });
+}
+
+async function handleSessionFellApart(ls) {
+  const { channel, msg } = await fetchSessionMessage(ls);
+  if (msg) { try { await msg.unpin(); } catch {} }
+  ls.pinned = false;
+  const stillInterested = activeEntries().filter((e) => e.gamesSelected.includes(ls.game)).length;
+  if (channel) {
+    await channel.send({
+      content: `Session fell apart 😢 — still **${stillInterested}** people interested in **${ls.game}** if anyone wants to rally!`,
+      allowedMentions: { parse: [] },
+    });
+  }
+  await updateSessionCard(ls);
+  persistBoard();
+}
+
+async function createOrSyncSessionCards() {
+  const channel = await client.channels.fetch(PING_CHANNEL_ID).catch(() => null);
+  if (!channel) return;
   const all = activeEntries();
   const byGame = {};
   for (const e of all) for (const g of e.gamesSelected) (byGame[g] ||= []).push(e);
-  // Post session-forming notifications in the board channel so the ping channel stays clean.
-  const notifyChannel = await client.channels.fetch(BOARD_CHANNEL_ID).catch(() => null);
-  if (!notifyChannel) return;
   for (const game of Object.keys(byGame)) {
-    const sessions = computeSessionsForGame(game);
-    for (const s of sessions) {
-      if (s.players.length >= 3) {
-        const key = `${data.date}:${game}:${s.startHour}-${s.endHour}`;
-        if (boardState.notifiedSessions[key]) continue;
-        boardState.notifiedSessions[key] = true;
-        persistBoard();
-        const mentions = s.players.map((p) => `<@${p.userId}>`).join(' ');
-        const rolesNeeded = s.rolesNeeded.length ? s.rolesNeeded.map((r) => labelOf(ROLES, r)).join(', ') : 'none — full squad!';
-        await notifyChannel.send({
-          content: `👑 **Session forming!** ${s.players.length} legends are playing **${game}** tonight — window is **${formatHour(s.startHour)} → ${formatHour(s.endHour)}**.\nRoles still needed: ${rolesNeeded}\n${mentions} — click LFG in your DM to lock in!`,
-          allowedMentions: { users: s.players.map((p) => p.userId) },
+    const groups = computeSessionsForGame(game);
+    for (const s of groups) {
+      if (s.players.length < 3) continue;
+      const id = `${data.date}:${game}:${s.startHour}-${s.endHour}`;
+      let ls = boardState.liveSessions[id];
+      // Allow a fell-apart session to recover if 3+ overlap again.
+      if (ls && ls.fellApart && !ls.endedPosted) {
+        ls.fellApart = false;
+        const known = new Set([...ls.confirmed, ...ls.late, ...ls.cantMake]);
+        for (const p of s.players) if (!known.has(p.userId)) ls.confirmed.push(p.userId);
+        const channel2 = await client.channels.fetch(ls.channelId).catch(() => null);
+        const oldMsg = ls.messageId && channel2 ? await channel2.messages.fetch(ls.messageId).catch(() => null) : null;
+        if (oldMsg) { try { await oldMsg.unpin(); } catch {} try { await oldMsg.delete(); } catch {} }
+        ls.messageId = null;
+        const newMsg = await channel.send({
+          content: `🔁 **Session relocked!** ${buildSessionCardContent(ls)}`,
+          components: [buildSessionRow(ls)],
+          allowedMentions: { users: ls.confirmed },
         });
+        ls.messageId = newMsg.id;
+        try { await newMsg.pin(); ls.pinned = true; } catch {}
+        persistBoard();
+        continue;
       }
+      if (!ls) {
+        ls = {
+          id, date: data.date, game,
+          startHour: s.startHour, endHour: s.endHour,
+          confirmed: s.players.map((p) => p.userId),
+          late: [], cantMake: [],
+          channelId: PING_CHANNEL_ID, messageId: null, pinned: false,
+          preSessionPosted: false, endedPosted: false, fellApart: false,
+          ratings: {},
+        };
+        boardState.liveSessions[id] = ls;
+        const msg = await channel.send({
+          content: buildSessionCardContent(ls),
+          components: [buildSessionRow(ls)],
+          allowedMentions: { users: ls.confirmed },
+        });
+        ls.messageId = msg.id;
+        try { await msg.pin(); ls.pinned = true; } catch {}
+        persistBoard();
+      } else if (!ls.fellApart && !ls.endedPosted) {
+        // Sync: any newly-submitted players who overlap this window and aren't already tracked
+        // get auto-added to confirmed (they can click "Can't make it" to drop out).
+        let changed = false;
+        for (const p of s.players) {
+          if (!ls.confirmed.includes(p.userId) && !ls.late.includes(p.userId) && !ls.cantMake.includes(p.userId)) {
+            ls.confirmed.push(p.userId);
+            changed = true;
+          }
+        }
+        if (changed) { persistBoard(); await updateSessionCard(ls); }
+      }
+    }
+  }
+}
+
+async function sendPreSessionPing(ls) {
+  const channel = await client.channels.fetch(PING_CHANNEL_ID).catch(() => null);
+  if (!channel) return;
+  const confList = ls.confirmed.length ? ls.confirmed.map((u) => `<@${u}>`).join(' ') : '_nobody yet_';
+  const lateList = ls.late.length ? ls.late.map((u) => `<@${u}>`).join(' ') : '_nobody_';
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`sess:late:${ls.id}`).setLabel("👀 Joining late — count me in").setStyle(ButtonStyle.Primary),
+  );
+  await channel.send({
+    content: `⏰ **${ls.game}** session starts in 30 minutes!\n**Confirmed:** ${confList}\n**Joining late:** ${lateList}\nGet your game open! 🎮`,
+    components: [row],
+    allowedMentions: { users: [...ls.confirmed, ...ls.late] },
+  });
+}
+
+function buildRatingRow(sessionId) {
+  return new ActionRowBuilder().addComponents(
+    [1, 2, 3, 4, 5].map((n) =>
+      new ButtonBuilder().setCustomId(`rate:${sessionId}:${n}`).setLabel(`⭐${n}`).setStyle(ButtonStyle.Secondary),
+    ),
+  );
+}
+
+async function sendSessionEndedMessage(ls) {
+  const { channel, msg } = await fetchSessionMessage(ls);
+  if (msg) { try { await msg.unpin(); } catch {} }
+  ls.pinned = false;
+  if (!channel) return;
+  const players = [...new Set([...ls.confirmed, ...ls.late])];
+  const mentions = players.map((u) => `<@${u}>`).join(' ');
+  const ratingMsg = await channel.send({
+    content: `🎮 **GG Legends!** How was the **${ls.game}** session tonight? ${mentions}\nRate it! Your ratings help us find better sessions next time 👑`,
+    components: [buildRatingRow(ls.id)],
+    allowedMentions: { users: players },
+  });
+  ls.ratingMessageId = ratingMsg.id;
+  // Seed rating record
+  if (!data.ratings[ls.id]) {
+    data.ratings[ls.id] = {
+      sessionId: ls.id, game: ls.game, date: ls.date,
+      players, ratings: {}, average: null,
+    };
+    persistData();
+  }
+  // Also refresh the session card (strip buttons)
+  await updateSessionCard(ls);
+}
+
+// Scheduler tick — checks every minute for pre-session pings and session ends.
+async function liveSessionTick() {
+  const now = new Date();
+  for (const ls of Object.values(boardState.liveSessions)) {
+    try {
+      if (ls.endedPosted) continue;
+      const startAt = sessionStartDate(ls);
+      const endAt = sessionActualEndDate(ls);
+      if (!ls.fellApart && !ls.preSessionPosted && now >= new Date(startAt.getTime() - 30 * 60 * 1000) && now < startAt) {
+        await sendPreSessionPing(ls);
+        ls.preSessionPosted = true;
+        persistBoard();
+      }
+      if (now >= endAt) {
+        await sendSessionEndedMessage(ls);
+        ls.endedPosted = true;
+        persistBoard();
+      }
+    } catch (e) {
+      console.error('liveSessionTick error for', ls.id, e);
     }
   }
 }
@@ -547,6 +747,67 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     if (id === 'daily:no') {
       await interaction.reply({ content: 'No worries! See you tomorrow 👋', ephemeral: true });
+      return;
+    }
+
+    // ===== Session card buttons (public channels) =====
+    if (id.startsWith('sess:')) {
+      const parts = id.split(':');
+      const action = parts[1]; // in | late | out
+      const sessionId = parts.slice(2).join(':');
+      const ls = boardState.liveSessions[sessionId];
+      if (!ls) {
+        await interaction.reply({ content: 'That session is no longer active.', ephemeral: true });
+        return;
+      }
+      if (ls.endedPosted) {
+        await interaction.reply({ content: 'That session has already ended.', ephemeral: true });
+        return;
+      }
+      const uid = interaction.user.id;
+      ls.confirmed = ls.confirmed.filter((u) => u !== uid);
+      ls.late = ls.late.filter((u) => u !== uid);
+      ls.cantMake = ls.cantMake.filter((u) => u !== uid);
+      let label = '';
+      if (action === 'in') { ls.confirmed.push(uid); label = "you're confirmed ✅"; ls.fellApart = false; }
+      else if (action === 'late') { ls.late.push(uid); label = 'marked as joining late 👀'; }
+      else if (action === 'out') { ls.cantMake.push(uid); label = "marked as can't make it 😴"; }
+      persistBoard();
+      if (ls.confirmed.length < 3 && !ls.fellApart && action !== 'in') {
+        ls.fellApart = true;
+        persistBoard();
+        await handleSessionFellApart(ls);
+      } else {
+        await updateSessionCard(ls);
+      }
+      await interaction.reply({ content: `Got it — ${label}.`, ephemeral: true });
+      return;
+    }
+
+    // ===== Rating buttons (public channel) =====
+    if (id.startsWith('rate:')) {
+      const parts = id.split(':');
+      const stars = parseInt(parts[parts.length - 1], 10);
+      const sessionId = parts.slice(1, -1).join(':');
+      const ls = boardState.liveSessions[sessionId];
+      const rec = data.ratings[sessionId];
+      if (!ls || !rec) {
+        await interaction.reply({ content: 'That rating window is closed.', ephemeral: true });
+        return;
+      }
+      if (!Number.isInteger(stars) || stars < 1 || stars > 5) {
+        await interaction.reply({ content: 'Invalid rating.', ephemeral: true });
+        return;
+      }
+      if (!rec.players.includes(interaction.user.id)) {
+        await interaction.reply({ content: 'Only players from that session can rate it 👑', ephemeral: true });
+        return;
+      }
+      rec.ratings[interaction.user.id] = stars;
+      const vals = Object.values(rec.ratings);
+      rec.average = vals.reduce((a, b) => a + b, 0) / vals.length;
+      persistData();
+      await interaction.reply({ content: `Thanks for rating ${ls.game} — ⭐${stars}!`, ephemeral: true });
       return;
     }
 
@@ -679,7 +940,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       const entry = {
         userId: interaction.user.id,
         username: interaction.user.username,
-        gamesSelected: [...session.games].map((i) => GAMES[i]),
+        gamesSelected: [...session.games],
         earliestTime: formatHour(session.earliestHour),
         latestTime: formatHour(session.latestHour),
         earliestHour: session.earliestHour,
@@ -695,7 +956,7 @@ client.on(Events.InteractionCreate, async (interaction) => {
       sessions.delete(interaction.user.id);
       await interaction.update({ content: '✅ Posted to the board! Good luck, Legend 👑', components: [] });
       await refreshBoard();
-      await checkSessionFormingNotifications();
+      await createOrSyncSessionCards();
       return;
     }
     if (id === 'final:nope') {
@@ -782,6 +1043,9 @@ client.once(Events.ClientReady, async (c) => {
   console.log(`Daily ping scheduled for ${PING_HOUR}:00 every day.`);
   // Ensure a board message exists so the channel always shows something
   try { await refreshBoard(); } catch (e) { console.error('Initial board refresh failed', e); }
+  // Tick every minute for pre-session pings and session-ended ratings
+  liveSessionTick().catch((e) => console.error('liveSessionTick init failed', e));
+  setInterval(() => { liveSessionTick().catch((e) => console.error('liveSessionTick failed', e)); }, 60 * 1000);
 });
 
 client.login(DISCORD_TOKEN).catch((e) => {

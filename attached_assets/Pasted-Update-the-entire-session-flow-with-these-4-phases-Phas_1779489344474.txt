@@ -1,0 +1,18 @@
+Update the entire session flow with these 4 phases:
+Phase 1 — Board (silent, runs all day)
+Keep the existing #legend-board auto-updating as people submit. No change here.
+Phase 2 — Session Confirmation (triggers when 3+ people match on same game with overlapping times)
+Post ONE message in the PING_CHANNEL (general) tagging everyone in that session. Format:
+"👑 Session locked in! [GAME] — Tonight [START TIME] to [END TIME] [tagged users] are all down! Roles: [list filled roles with ✅ and missing roles with ⚠️]"
+Then three buttons: ✅ I'm in — confirm me, 👀 I'll be joining late, 😴 Can't make it
+PIN this message in #general automatically.
+This message auto-updates as people click the buttons — confirmed list grows, late list grows, cant make it removes them.
+If confirmed drops below 3 people it unpins and posts "Session fell apart 😢 — still [X] people interested in [GAME] if anyone wants to rally!"
+Phase 3 — Pre-session ping (30 minutes before the session start time)
+Bot posts in #general: "⏰ [GAME] session starts in 30 minutes! Confirmed: [list] Still joining late: [list] Get your game open! 🎮 [Join late button for anyone who hasn't responded yet]"
+Phase 4 — Session end + rating (at the latest end time of confirmed players)
+Bot unpins the session message and posts in #general: "🎮 GG Legends! How was the [GAME] session tonight? [tagged users] Rate it! ⭐1 ⭐2 ⭐3 ⭐4 ⭐5 — your ratings help us find better sessions next time 👑"
+Save the ratings per user per session to data.json with the game, who played, average rating, and date.
+Also:
+When someone clicks "👀 Joining late" on the session card in #general — they should be able to click it even if they originally said No to gaming today or didn't respond at all. This is the one-click late join that requires no flow — just adds them to the late list on the session card.
+When someone clicks "😴 Can't make it" remove them from the session, update the card, and if a role they were filling is now empty mark it as ⚠️ needed again.
