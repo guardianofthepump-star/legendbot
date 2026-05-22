@@ -113,12 +113,6 @@ const ROLES = [
   { id: 'sniper',   label: '🎯 Sniper/Range' },
   { id: 'fill',     label: '🃏 Fill/Whatever' },
 ];
-const VIBES = [
-  { id: 'chill',       label: '😎 Chill & casual' },
-  { id: 'tryhard',     label: '🔥 Tryhard/ranked' },
-  { id: 'learning',    label: '📚 Learning/new' },
-  { id: 'competitive', label: '🏆 Competitive' },
-];
 const COMMS = [
   { id: 'mic',      label: '🎙️ On mic' },
   { id: 'text',     label: '💬 Text only' },
@@ -136,7 +130,7 @@ function labelOf(list, id) {
 }
 
 // ===== Per-user wizard sessions (in memory) =====
-// session: { userId, step, earliestHour, latestHour, games:Set, role, vibe, comms, squad, startedAt }
+// session: { userId, step, earliestHour, latestHour, games:Set, role, comms, squad, startedAt }
 const sessions = new Map();
 const SESSION_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
@@ -169,7 +163,6 @@ const client = new Client({
 //  game:done
 //  game:custom:modal   (modal id)
 //  role:<id>
-//  vibe:<id>
 //  comms:<id>
 //  squad:<id>
 //  final:lfg / final:nope
@@ -263,7 +256,7 @@ async function sendStep(user, session) {
     for (let p = 0; p < GAME_PAGE_COUNT; p++) {
       const rows = chunkButtons(buildGamePageButtons(session, p), 5);
       const content = p === 0
-        ? `**Step 2 of 6 — Games**\nWhat games are you feeling today? Only pick ones you're really down to play 🎮 (tap to toggle, multi-select)`
+        ? `**Step 2 of 5 — Games**\nWhat games are you feeling today? Only pick ones you're really down to play 🎮 (tap to toggle, multi-select)`
         : `…more games:`;
       const msg = await user.send({ content, components: rows });
       session.gameMessageIds.push(msg.id);
@@ -276,25 +269,19 @@ async function sendStep(user, session) {
   } else if (session.step === 'role') {
     const rows = chunkButtons(buildSimpleButtons('role', ROLES, session.role), 3);
     await user.send({
-      content: `**Step 3 of 6 — Role**\nWhat role are you feeling today?`,
-      components: rows,
-    });
-  } else if (session.step === 'vibe') {
-    const rows = chunkButtons(buildSimpleButtons('vibe', VIBES, session.vibe), 4);
-    await user.send({
-      content: `**Step 4 of 6 — Vibe**\nWhat's your vibe tonight?`,
+      content: `**Step 3 of 5 — Role**\nWhat role are you feeling today?`,
       components: rows,
     });
   } else if (session.step === 'comms') {
     const rows = chunkButtons(buildSimpleButtons('comms', COMMS, session.comms), 3);
     await user.send({
-      content: `**Step 5 of 6 — Comms**\nMic check?`,
+      content: `**Step 4 of 5 — Comms**\nMic check?`,
       components: rows,
     });
   } else if (session.step === 'squad') {
     const rows = chunkButtons(buildSimpleButtons('squad', SQUADS, session.squad), 3);
     await user.send({
-      content: `**Step 6 of 6 — Squad size**\nWhat's your squad situation?`,
+      content: `**Step 5 of 5 — Squad size**\nWhat's your squad situation?`,
       components: rows,
     });
   } else if (session.step === 'final') {
@@ -315,7 +302,6 @@ function formatSessionSummary(s) {
     `⏰ Time: **${earliest} – ${latest}**`,
     `🎮 Games: ${games}`,
     `🎭 Role: ${labelOf(ROLES, s.role)}`,
-    `✨ Vibe: ${labelOf(VIBES, s.vibe)}`,
     `🎙️ Comms: ${labelOf(COMMS, s.comms)}`,
     `👥 Squad: ${labelOf(SQUADS, s.squad)}`,
   ].join('\n');
@@ -331,13 +317,12 @@ async function startWizard(user) {
     gameMessageIds: [],
     gameControlsMessageId: null,
     role: null,
-    vibe: null,
     comms: null,
     squad: null,
     startedAt: Date.now(),
   });
   try {
-    await user.send("Let's get you locked in. I'll ask 6 quick things 👇");
+    await user.send("Let's get you locked in. I'll ask 5 quick things 👇");
     await sendStep(user, sessions.get(user.id));
   } catch (e) {
     console.error('Failed to DM user', user.id, e.message);
@@ -468,7 +453,7 @@ function buildBoardContent() {
     if (sessions.length === 0) {
       lines.push(`🎮 **${game}** — ${allPlayers.length} interested`);
       for (const p of allPlayers) {
-        lines.push(`  • ${p.username} (${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}, ${labelOf(ROLES, p.role)}, ${labelOf(VIBES, p.vibe)})`);
+        lines.push(`  • ${p.username} (${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}, ${labelOf(ROLES, p.role)}, ${labelOf(COMMS, p.comms)})`);
       }
       lines.push('');
       continue;
@@ -477,7 +462,7 @@ function buildBoardContent() {
       const dot = s.confirmed ? '🟢' : '🟡';
       lines.push(`${dot} **${game}** — 🕒 Shared window **${formatHour(s.startHour)}–${formatHour(s.endHour)}** _(when all ${s.players.length} are online together)_`);
       for (const p of s.players) {
-        lines.push(`  • <@${p.userId}> — ${labelOf(ROLES, p.role)} · ${labelOf(VIBES, p.vibe)} · ${labelOf(COMMS, p.comms)} · _online ${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}_`);
+        lines.push(`  • <@${p.userId}> — ${labelOf(ROLES, p.role)} · ${labelOf(COMMS, p.comms)} · _online ${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}_`);
       }
       lines.push(`  Roles still needed: ${s.rolesNeeded.length ? s.rolesNeeded.map((r) => labelOf(ROLES, r)).join(', ') : '_none — squad complete_'}`);
     }
@@ -486,7 +471,7 @@ function buildBoardContent() {
     if (leftovers.length) {
       lines.push(`  _Also interested in **${game}** (no overlap yet):_`);
       for (const p of leftovers) {
-        lines.push(`    • ${p.username} (${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}, ${labelOf(ROLES, p.role)}, ${labelOf(VIBES, p.vibe)})`);
+        lines.push(`    • ${p.username} (${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}, ${labelOf(ROLES, p.role)}, ${labelOf(COMMS, p.comms)})`);
       }
     }
     lines.push('');
@@ -928,13 +913,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (id.startsWith('role:')) {
       session.role = id.split(':')[1];
       await interaction.update({ content: `🎭 Role: ${labelOf(ROLES, session.role)}`, components: [] });
-      advance(session, 'vibe');
-      await sendStep(interaction.user, session);
-      return;
-    }
-    if (id.startsWith('vibe:')) {
-      session.vibe = id.split(':')[1];
-      await interaction.update({ content: `✨ Vibe: ${labelOf(VIBES, session.vibe)}`, components: [] });
       advance(session, 'comms');
       await sendStep(interaction.user, session);
       return;
@@ -964,7 +942,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
         earliestHour: session.earliestHour,
         latestHour: session.latestHour,
         role: session.role,
-        vibe: session.vibe,
         comms: session.comms,
         squadSize: session.squad,
         timestamp: new Date().toISOString(),
