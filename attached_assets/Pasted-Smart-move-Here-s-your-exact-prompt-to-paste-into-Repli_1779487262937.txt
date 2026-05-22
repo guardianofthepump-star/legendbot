@@ -1,0 +1,49 @@
+Smart move! Here's your exact prompt to paste into Replit's AI:
+
+---
+
+> I want to build a Discord bot called LegendBot using Node.js and discord.js v14. The bot does the following:
+>
+> **Daily ping flow (sent every day at a set time to the whole server):**
+> The bot pings @everyone with: "Hey Legend! 👑 Are you planning on gaming today?" with two buttons: ✅ Yes, let's game and ❌ Not today. If they click No, it replies privately "No worries! See you tomorrow 👋". If they click Yes it starts a private DM flow with that user asking:
+>
+> **Step 1 — Time:** "What times are you online today?" — buttons for every 2 hours from 12PM to 4AM, they pick earliest and latest.
+>
+> **Step 2 — Games:** "What games are you feeling today? Only pick ones you're really down to play 🎮" — multi-select buttons including: Fortnite, Warzone, Valorant, Apex Legends, League of Legends, Dota 2, GTA Online, Destiny 2, Minecraft, Deep Rock Galactic, Overwatch 2, World of Warcraft, Final Fantasy XIV, Rainbow Six Siege, Phasmophobia, Helldivers 2. A Done button confirms selection.
+>
+> **Step 3 — Role:** "What role are you feeling today?" — single select buttons: 🛡️ Tank, ⚔️ DPS/Fragger, 💚 Healer/Support, 🧠 Strategist/IGL, 🌀 Crowd Control, 👁️ Scout/Flanker, 🔧 Engineer/Builder, 🎯 Sniper/Range, 🃏 Fill/Whatever.
+>
+> **Step 4 — Vibe:** "What's your vibe tonight?" — single select: 😎 Chill & casual, 🔥 Tryhard/ranked, 📚 Learning/new, 🏆 Competitive.
+>
+> **Step 5 — Comms:** "Mic check?" — single select: 🎙️ On mic, 💬 Text only, 🤷 Flexible.
+>
+> **Step 6 — Squad size:** "What's your squad situation?" — single select: 🙋 Solo looking for full squad, 👥 Got 2-3 need more, 🤝 Open to anything.
+>
+> After all steps, show two buttons: 🎮 LFG — Post me to the board! and 😴 Nevermind. If they click LFG, save their full response and update the live board.
+>
+> **Live Session Board:**
+> In a dedicated channel called #legend-board, the bot keeps ONE pinned message that auto-updates every time someone submits. It shows all active players grouped by game. For each game that has 2+ players with overlapping time windows, it shows a SESSION block with: game name, session start time (earliest overlap of 2+ people), session end time (latest time of the last 2 people), list of who's in with their role and vibe, what roles are still needed, a green dot if session is confirmed (3+ people) or yellow if still building. For each player entry it shows their name, role emoji, vibe tag, and time window.
+>
+> **Session forming notifications:**
+> When a game hits 3+ people with overlapping times, the bot posts a new message in the server (not a DM) tagging everyone in that session: "👑 Session forming! X people are playing [GAME] tonight — window is [START] to [END]. Roles still needed: [LIST]. Click LFG in your DM to lock in!"
+>
+> **Data:**
+> Store all responses in a local JSON file called data.json. Each entry has: userId, username, gamesSelected, earliestTime, latestTime, role, vibe, comms, squadSize, timestamp. Reset the file each day when the new daily ping goes out.
+>
+> **Commands:**
+> /ping — manually trigger the daily ping (for testing)
+> /board — manually refresh and repost the live board
+> /reset — clear today's data and start fresh
+>
+> **Environment variables needed:**
+> DISCORD_TOKEN — the bot token
+> GUILD_ID — the server ID
+> PING_CHANNEL_ID — channel where the daily ping goes
+> BOARD_CHANNEL_ID — channel where the live board lives (#legend-board)
+> DAILY_PING_HOUR — what hour to send the daily ping (24hr format, e.g. 18 for 6PM)
+>
+> Use discord.js v14, store the token in a .env file, use node-cron for the daily scheduled ping. Make it fully working, no placeholders. Single file index.js is fine.
+
+---
+
+Paste that whole thing into Replit's AI prompt and hit generate. Once it spits out the code, screenshot it and we'll check it together before you run it — there's usually one or two small things to fix. 🚀
