@@ -10,6 +10,9 @@ const {
   ActionRowBuilder,
   ButtonBuilder,
   ButtonStyle,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   REST,
   Routes,
   SlashCommandBuilder,
@@ -82,11 +85,21 @@ function formatHour(h) {
 
 // ===== Catalogs =====
 const GAMES = [
-  'Fortnite', 'Warzone', 'Valorant', 'Apex Legends', 'League of Legends',
-  'Dota 2', 'GTA Online', 'Destiny 2', 'Minecraft', 'Deep Rock Galactic',
-  'Overwatch 2', 'World of Warcraft', 'Final Fantasy XIV', 'Rainbow Six Siege',
-  'Phasmophobia', 'Helldivers 2',
-];
+  'Among Us', 'Apex Legends', 'Ark Survival Evolved', 'Back 4 Blood',
+  'Call of Duty Warzone', 'Conan Exiles', 'DayZ', 'Dead by Daylight',
+  'Deep Rock Galactic', 'Destiny 2', 'Dota 2', 'Elden Ring',
+  'Escape from Tarkov', 'Fall Guys', 'Final Fantasy XIV', 'Fortnite',
+  'Green Hell', 'GTA Online', 'Helldivers 2', 'Hunt Showdown',
+  'League of Legends', 'Minecraft', 'Monster Hunter World', "No Man's Sky",
+  'Overwatch 2', 'Palworld', 'Path of Titans', 'Phasmophobia',
+  'Rainbow Six Siege', 'Roblox', 'Rust', 'Sea of Thieves',
+  'Sons of the Forest', 'Star Wars The Old Republic', 'Terraria', 'The Forest',
+  'The Isle', 'Unturned', 'Valheim', 'Valorant', 'World of Warcraft',
+].sort((a, b) => a.localeCompare(b));
+// Split into pages so we can fit toggle buttons within Discord's 25-component-per-message limit.
+// Page 1: first 20 games (4 rows × 5). Page 2: rest + Done + Custom (max 25).
+const GAMES_PAGE_SIZE = 20;
+const GAME_PAGE_COUNT = 2; // last page may carry up to GAMES_PAGE_SIZE+5 games (Discord 25-component cap)
 const ROLES = [
   { id: 'tank',     label: '🛡️ Tank' },
   { id: 'dps',      label: '⚔️ DPS/Fragger' },
@@ -149,8 +162,10 @@ const client = new Client({
 //  daily:yes / daily:no
 //  time:early:<hour>   (Q1 — pick earliest)
 //  time:late:<hour>    (Q2 — pick latest)
-//  game:toggle:<idx>
+//  game:toggle:<idx>   (idx into sorted GAMES)
+//  game:custom         (opens modal)
 //  game:done
+//  game:custom:modal   (modal id)
 //  role:<id>
 //  vibe:<id>
 //  comms:<id>
@@ -185,12 +200,36 @@ function buildLatestButtons(earliestHour) {
   );
 }
 
-function buildGameButtons(session) {
-  return GAMES.map((g, idx) =>
+function buildGamePageButtons(session, pageIndex) {
+  const start = pageIndex * GAMES_PAGE_SIZE;
+  const end = Math.min(GAMES.length, start + GAMES_PAGE_SIZE + (pageIndex === GAME_PAGE_COUNT - 1 ? 5 : 0));
+  const buttons = [];
+  for (let i = start; i < end; i++) {
+    buttons.push(
+      new ButtonBuilder()
+        .setCustomId(`game:toggle:${i}`)
+        .setLabel(GAMES[i])
+        .setStyle(session.games.has(GAMES[i]) ? ButtonStyle.Success : ButtonStyle.Secondary),
+    );
+  }
+  return buttons;
+}
+
+function pageIndexForGameIdx(idx) {
+  return Math.min(Math.floor(idx / GAMES_PAGE_SIZE), GAME_PAGE_COUNT - 1);
+}
+
+function buildGameControlsRow(session) {
+  return new ActionRowBuilder().addComponents(
     new ButtonBuilder()
-      .setCustomId(`game:toggle:${idx}`)
-      .setLabel(g)
-      .setStyle(session.games.has(idx) ? ButtonStyle.Success : ButtonStyle.Secondary),
+      .setCustomId('game:done')
+      .setLabel(`✅ Done${session.games.size ? ` (${session.games.size})` : ''}`)
+      .setStyle(ButtonStyle.Primary)
+      .setDisabled(session.games.size === 0),
+    new ButtonBuilder()
+      .setCustomId('game:custom')
+      .setLabel("📝 My game isn't listed — I'll type it")
+      .setStyle(ButtonStyle.Secondary),
   );
 }
 
@@ -217,15 +256,21 @@ async function sendStep(user, session) {
       components: rows,
     });
   } else if (session.step === 'games') {
-    const rows = chunkButtons(buildGameButtons(session), 4);
-    const doneRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('game:done').setLabel('Done').setStyle(ButtonStyle.Primary)
-        .setDisabled(session.games.size === 0),
-    );
-    await user.send({
-      content: `**Step 2 of 6 — Games**\nWhat games are you feeling today? Only pick ones you're really down to play 🎮 (tap to toggle)`,
-      components: [...rows, doneRow],
+    // Send game pages as separate DMs so we stay under Discord's 25-component-per-message cap.
+    session.gameMessageIds = [];
+    for (let p = 0; p < GAME_PAGE_COUNT; p++) {
+      const rows = chunkButtons(buildGamePageButtons(session, p), 5);
+      const content = p === 0
+        ? `**Step 2 of 6 — Games**\nWhat games are you feeling today? Only pick ones you're really down to play 🎮 (tap to toggle, multi-select)`
+        : `…more games:`;
+      const msg = await user.send({ content, components: rows });
+      session.gameMessageIds.push(msg.id);
+    }
+    const controlsMsg = await user.send({
+      content: 'When you\'re done picking, hit ✅ — or add a custom game 👇',
+      components: [buildGameControlsRow(session)],
     });
+    session.gameControlsMessageId = controlsMsg.id;
   } else if (session.step === 'role') {
     const rows = chunkButtons(buildSimpleButtons('role', ROLES, session.role), 3);
     await user.send({
@@ -263,7 +308,7 @@ async function sendStep(user, session) {
 function formatSessionSummary(s) {
   const earliest = s.earliestHour != null ? formatHour(s.earliestHour) : '?';
   const latest = s.latestHour != null ? formatHour(s.latestHour) : '?';
-  const games = [...s.games].map((i) => GAMES[i]).join(', ') || '—';
+  const games = [...s.games].join(', ') || '—';
   return [
     `⏰ Time: **${earliest} – ${latest}**`,
     `🎮 Games: ${games}`,
@@ -281,6 +326,8 @@ async function startWizard(user) {
     earliestHour: null,
     latestHour: null,
     games: new Set(),
+    gameMessageIds: [],
+    gameControlsMessageId: null,
     role: null,
     vibe: null,
     comms: null,
@@ -481,6 +528,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isChatInputCommand()) {
       return handleSlash(interaction);
     }
+    if (interaction.isModalSubmit()) {
+      return handleModal(interaction);
+    }
     if (!interaction.isButton()) return;
 
     const id = interaction.customId;
@@ -543,17 +593,42 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
     if (id.startsWith('game:toggle:')) {
       const idx = parseInt(id.split(':')[2], 10);
-      if (session.games.has(idx)) session.games.delete(idx);
-      else session.games.add(idx);
-      const rows = chunkButtons(buildGameButtons(session), 4);
-      const doneRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('game:done').setLabel('Done').setStyle(ButtonStyle.Primary)
-          .setDisabled(session.games.size === 0),
-      );
-      await interaction.update({
-        content: `**Step 2 of 6 — Games**\nWhat games are you feeling today? Only pick ones you're really down to play 🎮 (tap to toggle)\nSelected: ${session.games.size}`,
-        components: [...rows, doneRow],
-      });
+      const game = GAMES[idx];
+      if (!game) {
+        await interaction.reply({ content: 'Unknown game.', ephemeral: true });
+        return;
+      }
+      if (session.games.has(game)) session.games.delete(game);
+      else session.games.add(game);
+      const pageIdx = pageIndexForGameIdx(idx);
+      const rows = chunkButtons(buildGamePageButtons(session, pageIdx), 5);
+      await interaction.update({ components: rows });
+      // Also refresh the controls message so the Done count updates.
+      try {
+        if (session.gameControlsMessageId) {
+          const controlsMsg = await interaction.channel.messages.fetch(session.gameControlsMessageId);
+          await controlsMsg.edit({ components: [buildGameControlsRow(session)] });
+        }
+      } catch (e) { /* ignore */ }
+      return;
+    }
+    if (id === 'game:custom') {
+      const modal = new ModalBuilder()
+        .setCustomId('game:custom:modal')
+        .setTitle('Add a custom game')
+        .addComponents(
+          new ActionRowBuilder().addComponents(
+            new TextInputBuilder()
+              .setCustomId('gameName')
+              .setLabel("What's the game?")
+              .setPlaceholder('e.g. Lethal Company')
+              .setStyle(TextInputStyle.Short)
+              .setMinLength(2)
+              .setMaxLength(60)
+              .setRequired(true),
+          ),
+        );
+      await interaction.showModal(modal);
       return;
     }
     if (id === 'game:done') {
@@ -561,8 +636,11 @@ client.on(Events.InteractionCreate, async (interaction) => {
         await interaction.reply({ content: 'Pick at least one game.', ephemeral: true });
         return;
       }
-      const picked = [...session.games].map((i) => GAMES[i]).join(', ');
-      await interaction.update({ content: `🎮 Games locked: ${picked}`, components: [] });
+      const picked = [...session.games].join(', ');
+      await interaction.update({
+        content: `🎮 **Games locked in:** ${picked}\nNice taste 👀`,
+        components: [],
+      });
       advance(session, 'role');
       await sendStep(interaction.user, session);
       return;
@@ -631,6 +709,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
     }
   }
 });
+
+// ===== Modal submissions =====
+async function handleModal(interaction) {
+  if (interaction.customId !== 'game:custom:modal') return;
+  const session = getActiveSession(interaction.user.id);
+  if (!session) {
+    await interaction.reply({ content: 'This session expired. Click ✅ on the daily ping to restart.', ephemeral: true });
+    return;
+  }
+  const raw = interaction.fields.getTextInputValue('gameName').trim();
+  if (!raw) {
+    await interaction.reply({ content: 'Empty game name — try again.', ephemeral: true });
+    return;
+  }
+  // Normalise: collapse whitespace, cap length
+  const game = raw.replace(/\s+/g, ' ').slice(0, 60);
+  session.games.add(game);
+  await interaction.reply({ content: `✅ Added **${game}** to your picks.`, ephemeral: true });
+  // Refresh the controls message Done count
+  try {
+    if (session.gameControlsMessageId) {
+      const controlsMsg = await interaction.channel.messages.fetch(session.gameControlsMessageId);
+      await controlsMsg.edit({ components: [buildGameControlsRow(session)] });
+    }
+  } catch (e) { /* ignore */ }
+}
 
 // ===== Slash commands =====
 async function handleSlash(interaction) {
