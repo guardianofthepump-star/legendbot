@@ -541,27 +541,35 @@ function sessionActualEndDate(ls) {
 
 function buildSessionCardContent(ls) {
   const byId = data.entries;
+  // Hide fake/test users from the display entirely — but keep them in ls.* for overlap math.
+  const realConfirmed = realSnowflakes(ls.confirmed);
+  const realLate = realSnowflakes(ls.late);
+  const realOut = realSnowflakes(ls.cantMake);
+
+  // Role tally uses ALL confirmed (real + fake) so the test command still shows filled roles.
   const filledRoles = new Set();
   for (const uid of ls.confirmed) {
     const e = byId[uid];
     if (e && e.role && e.role !== 'fill') filledRoles.add(e.role);
   }
-  const roleLine = ROLES
-    .filter((r) => r.id !== 'fill')
-    .map((r) => `${filledRoles.has(r.id) ? '✅' : '⚠️'} ${r.label}`)
-    .join(' · ');
-  const confMentions = ls.confirmed.length ? ls.confirmed.map((u) => `<@${u}>`).join(' ') : '_nobody yet_';
-  const lateLine = ls.late.length ? ls.late.map((u) => `<@${u}>`).join(' ') : '_nobody_';
-  const outLine = ls.cantMake.length ? ls.cantMake.map((u) => `<@${u}>`).join(' ') : '_nobody_';
+  const realRoles = ROLES.filter((r) => r.id !== 'fill');
+  const filledLabels = realRoles.filter((r) => filledRoles.has(r.id)).map((r) => r.label.replace(/^[^\s]+\s/, ''));
+  const neededLabels = realRoles.filter((r) => !filledRoles.has(r.id)).map((r) => r.label.replace(/^[^\s]+\s/, ''));
+
+  const confMentions = realConfirmed.length ? realConfirmed.map((u) => `<@${u}>`).join(' ') : '_nobody yet_';
+  const lateLine = realLate.length ? realLate.map((u) => `<@${u}>`).join(' ') : '_nobody_';
+  const outLine = realOut.length ? realOut.map((u) => `<@${u}>`).join(' ') : '_nobody_';
+
   return [
     `👑 **Session locked in!** **${ls.game}**`,
     `🕒 **Shared window:** **${formatHour(ls.startHour)}–${formatHour(sessionActualEndHour(ls))}** _(when everyone's online together)_`,
     `${confMentions} are all down!`,
-    `**Roles:** ${roleLine}`,
+    `✅ **Filled:** ${filledLabels.length ? filledLabels.join(', ') : '_none yet_'}`,
+    `⚠️ **Still needed:** ${neededLabels.length ? neededLabels.join(', ') : '_squad complete!_'}`,
     '',
-    `✅ **Confirmed (${ls.confirmed.length}):** ${confMentions}`,
-    `👀 **Joining late (${ls.late.length}):** ${lateLine}`,
-    `😴 **Can't make it (${ls.cantMake.length}):** ${outLine}`,
+    `✅ **Confirmed (${realConfirmed.length}):** ${confMentions}`,
+    `👀 **Joining late (${realLate.length}):** ${lateLine}`,
+    `😴 **Can't make it (${realOut.length}):** ${outLine}`,
   ].join('\n');
 }
 
