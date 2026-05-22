@@ -1,6 +1,6 @@
-# [Project name]
+# LegendBot
 
-_Replace the heading above with the project's name, and this line with one sentence describing what this app does for users._
+A Discord bot that DMs server members a daily "gaming today?" check-in and maintains a live LFG board grouping players by game, overlapping time windows, role, and vibe.
 
 ## Run & Operate
 
@@ -22,7 +22,13 @@ _Replace the heading above with the project's name, and this line with one sente
 
 ## Where things live
 
-_Populate as you build — short repo map plus pointers to the source-of-truth file for DB schema, API contracts, theme files, etc._
+- `bots/legendbot/src/index.js` — entire bot (wizard, board, slash commands, cron)
+- `bots/legendbot/data.json` — today's check-ins (auto-reset each day on the daily ping)
+- `bots/legendbot/board.json` — pinned board message id + notified-sessions cache
+
+Required env (already set as Replit Secrets): `DISCORD_TOKEN`, `GUILD_ID`, `PING_CHANNEL_ID`, `BOARD_CHANNEL_ID`, `DAILY_PING_HOUR`.
+
+Slash commands: `/ping` (trigger daily ping), `/board` (repost board), `/reset` (clear today's data).
 
 ## Architecture decisions
 
