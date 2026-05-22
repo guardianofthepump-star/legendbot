@@ -267,13 +267,13 @@ async function sendStep(user, session) {
   if (session.step === 'time_early') {
     const rows = chunkButtons(buildEarliestButtons(), 5);
     await user.send({
-      content: "👑 What's the earliest you might jump on today?",
+      content: "**Step 1 of 5 — Time**\n👑 What's the earliest you might jump on today?",
       components: rows,
     });
   } else if (session.step === 'time_late') {
     const rows = chunkButtons(buildLatestButtons(session.earliestHour), 5);
     await user.send({
-      content: "👑 And what's the latest you'd game till? (be real with yourself — work and school wait for no one 😅)",
+      content: "**Step 1 of 5 — Time (latest)**\n👑 And what's the latest you'd game till? (be real with yourself — work and school wait for no one 😅)",
       components: rows,
     });
   } else if (session.step === 'games') {
@@ -321,6 +321,23 @@ function formatSessionSummary(s) {
     `🎙️ Comms: ${labelOf(COMMS, s.comms)}`,
     `👥 Squad: ${labelOf(SQUADS, s.squad)}`,
   ].join('\n');
+}
+
+// Delete this bot's prior DM messages to `user` so every new flow starts on a clean slate.
+// Bots can only delete messages they sent themselves, and DMs don't support bulk-delete,
+// so we walk recent history and delete one-by-one.
+async function clearBotDMHistory(user) {
+  try {
+    const dm = await user.createDM();
+    const msgs = await dm.messages.fetch({ limit: 50 });
+    const mine = msgs.filter((m) => m.author?.id === client.user.id);
+    for (const m of mine.values()) {
+      try { await m.delete(); } catch (e) { /* ignore — message may be too old or already gone */ }
+    }
+    console.log(`[dmCleanup] cleared ${mine.size} old DM(s) for ${user.username || user.id}`);
+  } catch (e) {
+    console.error(`[dmCleanup] failed for ${user.id}:`, e?.message);
+  }
 }
 
 async function startWizard(user) {
@@ -781,6 +798,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
 
     if (id === 'daily:yes') {
       await interaction.reply({ content: "Sliding into your DMs 👑", ephemeral: true });
+      // Wipe any leftover DM messages from earlier sessions/versions so the user
+      // only sees today's clean flow.
+      sessions.delete(interaction.user.id);
+      await clearBotDMHistory(interaction.user);
       try {
         await startWizard(interaction.user);
       } catch (e) {
