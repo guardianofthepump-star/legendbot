@@ -196,6 +196,12 @@ function buildLatestButtons(earliestHour) {
   );
 }
 
+// Discord snowflakes are 17-20 digit numeric strings. Filter out any fake/test IDs
+// so Discord's allowed_mentions validator doesn't reject the whole message.
+function realSnowflakes(ids) {
+  return (ids || []).filter((id) => typeof id === 'string' && /^\d{17,20}$/.test(id));
+}
+
 function gameMenuSlice(menuIdx) {
   return menuIdx === 0 ? GAMES.slice(0, GAME_MENU_SPLIT) : GAMES.slice(GAME_MENU_SPLIT);
 }
@@ -344,6 +350,8 @@ function advance(session, nextStep) {
 }
 
 // ===== Daily ping =====
+let lastDailyPingAt = 0;
+
 async function sendDailyPing() {
   ensureFreshDay(true);
   const channel = await client.channels.fetch(PING_CHANNEL_ID).catch(() => null);
@@ -578,7 +586,7 @@ async function updateSessionCard(ls) {
   await msg.edit({
     content: buildSessionCardContent(ls),
     components: ls.fellApart || ls.endedPosted ? [] : [buildSessionRow(ls)],
-    allowedMentions: { users: [...ls.confirmed, ...ls.late] },
+    allowedMentions: { users: realSnowflakes([...ls.confirmed, ...ls.late]) },
   });
 }
 
@@ -598,8 +606,13 @@ async function handleSessionFellApart(ls) {
 }
 
 async function createOrSyncSessionCards() {
-  const channel = await client.channels.fetch(PING_CHANNEL_ID).catch(() => null);
-  if (!channel) return;
+  console.log(`[sessionCards] start — PING_CHANNEL_ID=${PING_CHANNEL_ID}`);
+  const channel = await client.channels.fetch(PING_CHANNEL_ID).catch((e) => {
+    console.error('[sessionCards] channel fetch failed:', e?.message);
+    return null;
+  });
+  if (!channel) { console.error('[sessionCards] no channel — aborting'); return; }
+  console.log(`[sessionCards] channel ok: #${channel.name}`);
   const all = activeEntries();
   const byGame = {};
   for (const e of all) for (const g of e.gamesSelected) (byGame[g] ||= []).push(e);
@@ -621,7 +634,7 @@ async function createOrSyncSessionCards() {
         const newMsg = await channel.send({
           content: `🔁 **Session relocked!** ${buildSessionCardContent(ls)}`,
           components: [buildSessionRow(ls)],
-          allowedMentions: { users: ls.confirmed },
+          allowedMentions: { users: realSnowflakes(ls.confirmed) },
         });
         ls.messageId = newMsg.id;
         try { await newMsg.pin(); ls.pinned = true; } catch {}
@@ -639,13 +652,20 @@ async function createOrSyncSessionCards() {
           ratings: {},
         };
         boardState.liveSessions[id] = ls;
-        const msg = await channel.send({
-          content: buildSessionCardContent(ls),
-          components: [buildSessionRow(ls)],
-          allowedMentions: { users: ls.confirmed },
-        });
-        ls.messageId = msg.id;
-        try { await msg.pin(); ls.pinned = true; } catch {}
+        console.log(`[sessionCards] posting card for "${game}" ${s.startHour}-${s.endHour} (${s.players.length} players)`);
+        try {
+          const msg = await channel.send({
+            content: buildSessionCardContent(ls),
+            components: [buildSessionRow(ls)],
+            allowedMentions: { users: realSnowflakes(ls.confirmed) },
+          });
+          ls.messageId = msg.id;
+          console.log(`[sessionCards] posted ok — messageId=${msg.id}`);
+          try { await msg.pin(); ls.pinned = true; } catch (e) { console.error('[sessionCards] pin failed:', e?.message); }
+        } catch (e) {
+          console.error('[sessionCards] channel.send failed:', e?.message, e?.rawError);
+          delete boardState.liveSessions[id];
+        }
         persistBoard();
       } else if (!ls.fellApart && !ls.endedPosted) {
         // Sync: any newly-submitted players who overlap this window and aren't already tracked
@@ -674,7 +694,7 @@ async function sendPreSessionPing(ls) {
   await channel.send({
     content: `⏰ **${ls.game}** session starts in 30 minutes!\n**Confirmed:** ${confList}\n**Joining late:** ${lateList}\nGet your game open! 🎮`,
     components: [row],
-    allowedMentions: { users: [...ls.confirmed, ...ls.late] },
+    allowedMentions: { users: realSnowflakes([...ls.confirmed, ...ls.late]) },
   });
 }
 
@@ -696,7 +716,7 @@ async function sendSessionEndedMessage(ls) {
   const ratingMsg = await channel.send({
     content: `🎮 **GG Legends!** How was the **${ls.game}** session tonight? ${mentions}\nRate it! Your ratings help us find better sessions next time 👑`,
     components: [buildRatingRow(ls.id)],
-    allowedMentions: { users: players },
+    allowedMentions: { users: realSnowflakes(players) },
   });
   ls.ratingMessageId = ratingMsg.id;
   // Seed rating record
@@ -1009,6 +1029,17 @@ async function handleModal(interaction) {
 // ===== Slash commands =====
 async function handleSlash(interaction) {
   if (interaction.commandName === 'ping') {
+    const now = Date.now();
+    const cooldownMs = 10 * 60 * 1000;
+    if (lastDailyPingAt && now - lastDailyPingAt < cooldownMs) {
+      const mins = Math.ceil((cooldownMs - (now - lastDailyPingAt)) / 60000);
+      await interaction.reply({
+        content: `⏳ A ping was already sent recently — try again in ${mins} min.`,
+        ephemeral: true,
+      });
+      return;
+    }
+    lastDailyPingAt = now;
     await interaction.reply({ content: 'Triggering daily ping…', ephemeral: true });
     await sendDailyPing();
   } else if (interaction.commandName === 'board') {
