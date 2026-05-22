@@ -501,8 +501,9 @@ async function checkSessionFormingNotifications() {
   const all = activeEntries();
   const byGame = {};
   for (const e of all) for (const g of e.gamesSelected) (byGame[g] ||= []).push(e);
-  const pingChannel = await client.channels.fetch(PING_CHANNEL_ID).catch(() => null);
-  if (!pingChannel) return;
+  // Post session-forming notifications in the board channel so the ping channel stays clean.
+  const notifyChannel = await client.channels.fetch(BOARD_CHANNEL_ID).catch(() => null);
+  if (!notifyChannel) return;
   for (const game of Object.keys(byGame)) {
     const sessions = computeSessionsForGame(game);
     for (const s of sessions) {
@@ -513,7 +514,7 @@ async function checkSessionFormingNotifications() {
         persistBoard();
         const mentions = s.players.map((p) => `<@${p.userId}>`).join(' ');
         const rolesNeeded = s.rolesNeeded.length ? s.rolesNeeded.map((r) => labelOf(ROLES, r)).join(', ') : 'none — full squad!';
-        await pingChannel.send({
+        await notifyChannel.send({
           content: `👑 **Session forming!** ${s.players.length} legends are playing **${game}** tonight — window is **${formatHour(s.startHour)} → ${formatHour(s.endHour)}**.\nRoles still needed: ${rolesNeeded}\n${mentions} — click LFG in your DM to lock in!`,
           allowedMentions: { users: s.players.map((p) => p.userId) },
         });
