@@ -18,6 +18,8 @@ const {
   SlashCommandBuilder,
   Events,
   ChannelType,
+  StringSelectMenuBuilder,
+  StringSelectMenuOptionBuilder,
 } = require('discord.js');
 
 const {
@@ -98,10 +100,9 @@ const GAMES = [
   'Sons of the Forest', 'Star Wars The Old Republic', 'Terraria', 'The Forest',
   'The Isle', 'Unturned', 'Valheim', 'Valorant', 'World of Warcraft',
 ].sort((a, b) => a.localeCompare(b));
-// Split into pages so we can fit toggle buttons within Discord's 25-component-per-message limit.
-// Page 1: first 20 games (4 rows × 5). Page 2: rest + Done + Custom (max 25).
-const GAMES_PAGE_SIZE = 20;
-const GAME_PAGE_COUNT = 2; // last page may carry up to GAMES_PAGE_SIZE+5 games (Discord 25-component cap)
+// Game picker uses 2 StringSelectMenus (≤25 options each) + a controls row,
+// all in ONE message. Split roughly in half alphabetically.
+const GAME_MENU_SPLIT = Math.ceil(GAMES.length / 2); // first menu = first half
 const ROLES = [
   { id: 'tank',     label: '🛡️ Tank' },
   { id: 'dps',      label: '⚔️ DPS/Fragger' },
@@ -158,10 +159,10 @@ const client = new Client({
 //  daily:yes / daily:no
 //  time:early:<hour>   (Q1 — pick earliest)
 //  time:late:<hour>    (Q2 — pick latest)
-//  game:toggle:<idx>   (idx into sorted GAMES)
-//  game:custom         (opens modal)
+//  game:select:<menuIdx>  (StringSelectMenu, values = full selection in that menu)
+//  game:custom            (opens modal)
 //  game:done
-//  game:custom:modal   (modal id)
+//  game:custom:modal      (modal id)
 //  role:<id>
 //  comms:<id>
 //  squad:<id>
@@ -195,23 +196,28 @@ function buildLatestButtons(earliestHour) {
   );
 }
 
-function buildGamePageButtons(session, pageIndex) {
-  const start = pageIndex * GAMES_PAGE_SIZE;
-  const end = Math.min(GAMES.length, start + GAMES_PAGE_SIZE + (pageIndex === GAME_PAGE_COUNT - 1 ? 5 : 0));
-  const buttons = [];
-  for (let i = start; i < end; i++) {
-    buttons.push(
-      new ButtonBuilder()
-        .setCustomId(`game:toggle:${i}`)
-        .setLabel(GAMES[i])
-        .setStyle(session.games.has(GAMES[i]) ? ButtonStyle.Success : ButtonStyle.Secondary),
-    );
-  }
-  return buttons;
+function gameMenuSlice(menuIdx) {
+  return menuIdx === 0 ? GAMES.slice(0, GAME_MENU_SPLIT) : GAMES.slice(GAME_MENU_SPLIT);
 }
 
-function pageIndexForGameIdx(idx) {
-  return Math.min(Math.floor(idx / GAMES_PAGE_SIZE), GAME_PAGE_COUNT - 1);
+function buildGameSelectRow(session, menuIdx) {
+  const slice = gameMenuSlice(menuIdx);
+  const firstLetter = slice[0][0];
+  const lastLetter = slice[slice.length - 1][0];
+  const menu = new StringSelectMenuBuilder()
+    .setCustomId(`game:select:${menuIdx}`)
+    .setPlaceholder(`Pick games (${firstLetter}–${lastLetter}) — tap to multi-select`)
+    .setMinValues(0)
+    .setMaxValues(slice.length)
+    .addOptions(
+      slice.map((g) =>
+        new StringSelectMenuOptionBuilder()
+          .setLabel(g)
+          .setValue(g)
+          .setDefault(session.games.has(g)),
+      ),
+    );
+  return new ActionRowBuilder().addComponents(menu);
 }
 
 function buildGameControlsRow(session) {
@@ -223,9 +229,23 @@ function buildGameControlsRow(session) {
       .setDisabled(session.games.size === 0),
     new ButtonBuilder()
       .setCustomId('game:custom')
-      .setLabel("📝 My game isn't listed — I'll type it")
+      .setLabel("📝 Custom game")
       .setStyle(ButtonStyle.Secondary),
   );
+}
+
+function buildGameMessageComponents(session) {
+  return [
+    buildGameSelectRow(session, 0),
+    buildGameSelectRow(session, 1),
+    buildGameControlsRow(session),
+  ];
+}
+
+function buildGameMessageContent(session) {
+  const customs = [...session.games].filter((g) => !GAMES.includes(g));
+  const customLine = customs.length ? `\n📝 _Custom picks:_ ${customs.join(', ')}` : '';
+  return `**Step 2 of 5 — Games**\nWhat games are you feeling today? Tap a dropdown to multi-select 🎮${customLine}`;
 }
 
 function buildSimpleButtons(prefix, options, selected) {
@@ -251,21 +271,11 @@ async function sendStep(user, session) {
       components: rows,
     });
   } else if (session.step === 'games') {
-    // Send game pages as separate DMs so we stay under Discord's 25-component-per-message cap.
-    session.gameMessageIds = [];
-    for (let p = 0; p < GAME_PAGE_COUNT; p++) {
-      const rows = chunkButtons(buildGamePageButtons(session, p), 5);
-      const content = p === 0
-        ? `**Step 2 of 5 — Games**\nWhat games are you feeling today? Only pick ones you're really down to play 🎮 (tap to toggle, multi-select)`
-        : `…more games:`;
-      const msg = await user.send({ content, components: rows });
-      session.gameMessageIds.push(msg.id);
-    }
-    const controlsMsg = await user.send({
-      content: 'When you\'re done picking, hit ✅ — or add a custom game 👇',
-      components: [buildGameControlsRow(session)],
+    const msg = await user.send({
+      content: buildGameMessageContent(session),
+      components: buildGameMessageComponents(session),
     });
-    session.gameControlsMessageId = controlsMsg.id;
+    session.gameMessageId = msg.id;
   } else if (session.step === 'role') {
     const rows = chunkButtons(buildSimpleButtons('role', ROLES, session.role), 3);
     await user.send({
@@ -314,8 +324,7 @@ async function startWizard(user) {
     earliestHour: null,
     latestHour: null,
     games: new Set(),
-    gameMessageIds: [],
-    gameControlsMessageId: null,
+    gameMessageId: null,
     role: null,
     comms: null,
     squad: null,
@@ -735,6 +744,9 @@ client.on(Events.InteractionCreate, async (interaction) => {
     if (interaction.isModalSubmit()) {
       return handleModal(interaction);
     }
+    if (interaction.isStringSelectMenu()) {
+      return handleSelectMenu(interaction);
+    }
     if (!interaction.isButton()) return;
 
     const id = interaction.customId;
@@ -856,27 +868,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
       await sendStep(interaction.user, session);
       return;
     }
-    if (id.startsWith('game:toggle:')) {
-      const idx = parseInt(id.split(':')[2], 10);
-      const game = GAMES[idx];
-      if (!game) {
-        await interaction.reply({ content: 'Unknown game.', ephemeral: true });
-        return;
-      }
-      if (session.games.has(game)) session.games.delete(game);
-      else session.games.add(game);
-      const pageIdx = pageIndexForGameIdx(idx);
-      const rows = chunkButtons(buildGamePageButtons(session, pageIdx), 5);
-      await interaction.update({ components: rows });
-      // Also refresh the controls message so the Done count updates.
-      try {
-        if (session.gameControlsMessageId) {
-          const controlsMsg = await interaction.channel.messages.fetch(session.gameControlsMessageId);
-          await controlsMsg.edit({ components: [buildGameControlsRow(session)] });
-        }
-      } catch (e) { /* ignore */ }
-      return;
-    }
     if (id === 'game:custom') {
       const modal = new ModalBuilder()
         .setCustomId('game:custom:modal')
@@ -967,6 +958,26 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
+// ===== Select-menu submissions =====
+async function handleSelectMenu(interaction) {
+  if (!interaction.customId.startsWith('game:select:')) return;
+  const session = getActiveSession(interaction.user.id);
+  if (!session) {
+    await interaction.reply({ content: 'This session expired. Click ✅ on the daily ping to restart.', ephemeral: true });
+    return;
+  }
+  const menuIdx = parseInt(interaction.customId.split(':')[2], 10);
+  const sliceSet = new Set(gameMenuSlice(menuIdx));
+  const newSelections = new Set(interaction.values);
+  // Replace this menu's contribution: drop all of this slice's games, then re-add what's selected.
+  for (const g of sliceSet) session.games.delete(g);
+  for (const g of newSelections) session.games.add(g);
+  await interaction.update({
+    content: buildGameMessageContent(session),
+    components: buildGameMessageComponents(session),
+  });
+}
+
 // ===== Modal submissions =====
 async function handleModal(interaction) {
   if (interaction.customId !== 'game:custom:modal') return;
@@ -980,15 +991,17 @@ async function handleModal(interaction) {
     await interaction.reply({ content: 'Empty game name — try again.', ephemeral: true });
     return;
   }
-  // Normalise: collapse whitespace, cap length
   const game = raw.replace(/\s+/g, ' ').slice(0, 60);
   session.games.add(game);
   await interaction.reply({ content: `✅ Added **${game}** to your picks.`, ephemeral: true });
-  // Refresh the controls message Done count
+  // Refresh the single game message so Done count + custom-picks line update.
   try {
-    if (session.gameControlsMessageId) {
-      const controlsMsg = await interaction.channel.messages.fetch(session.gameControlsMessageId);
-      await controlsMsg.edit({ components: [buildGameControlsRow(session)] });
+    if (session.gameMessageId) {
+      const msg = await interaction.channel.messages.fetch(session.gameMessageId);
+      await msg.edit({
+        content: buildGameMessageContent(session),
+        components: buildGameMessageComponents(session),
+      });
     }
   } catch (e) { /* ignore */ }
 }
@@ -1013,6 +1026,31 @@ async function handleSlash(interaction) {
     ensureFreshDay(true);
     await refreshBoard();
     await interaction.reply({ content: "Today's data cleared.", ephemeral: true });
+  } else if (interaction.commandName === 'testsession') {
+    ensureFreshDay(false);
+    const stamp = Date.now();
+    const fakes = [
+      { id: `test-${stamp}-tank`,   username: 'TestLegend_Tank',   role: 'tank' },
+      { id: `test-${stamp}-dps`,    username: 'TestLegend_DPS',    role: 'dps' },
+      { id: `test-${stamp}-healer`, username: 'TestLegend_Healer', role: 'healer' },
+    ];
+    for (const u of fakes) {
+      data.entries[u.id] = {
+        userId: u.id, username: u.username,
+        gamesSelected: ['The Isle'],
+        earliestHour: 21, latestHour: 24,
+        earliestTime: '9PM', latestTime: '12AM',
+        role: u.role, comms: 'mic', squadSize: 'open',
+        timestamp: new Date().toISOString(),
+      };
+    }
+    persistData();
+    await interaction.reply({
+      content: '🧪 Simulated 3 players on **The Isle** 9PM–12AM. Posting session card to the ping channel now…\n_(Player names will show as raw IDs since they are fake users.)_',
+      ephemeral: true,
+    });
+    await refreshBoard();
+    await createOrSyncSessionCards();
   }
 }
 
@@ -1021,6 +1059,7 @@ async function registerCommands() {
     new SlashCommandBuilder().setName('ping').setDescription('Manually trigger the daily ping (testing)'),
     new SlashCommandBuilder().setName('board').setDescription('Manually refresh and repost the live board'),
     new SlashCommandBuilder().setName('reset').setDescription("Clear today's data and start fresh"),
+    new SlashCommandBuilder().setName('testsession').setDescription('Simulate a 3-player session on The Isle to preview the card'),
   ].map((c) => c.toJSON());
   const rest = new REST({ version: '10' }).setToken(DISCORD_TOKEN);
   await rest.put(Routes.applicationGuildCommands(client.user.id, GUILD_ID), { body: commands });
@@ -1030,6 +1069,8 @@ async function registerCommands() {
 // ===== Ready =====
 client.once(Events.ClientReady, async (c) => {
   console.log(`LegendBot ready as ${c.user.tag}`);
+  // Clear any stuck in-memory wizard sessions so DMs always start fresh on restart.
+  sessions.clear();
   try { await registerCommands(); } catch (e) { console.error('Command registration failed', e); }
   // Schedule daily ping at PING_HOUR:00 every day
   cron.schedule(`0 ${PING_HOUR} * * *`, () => {
