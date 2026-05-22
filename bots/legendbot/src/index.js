@@ -69,8 +69,9 @@ function persistData() { saveJson(DATA_FILE, data); }
 function persistBoard() { saveJson(BOARD_STATE_FILE, boardState); }
 
 // ===== Time slots =====
-// Hours from 12 (12PM) to 28 (4AM next day), step 2.
-const TIME_SLOTS = [12, 14, 16, 18, 20, 22, 24, 26, 28]; // 12PM, 2PM, 4PM, 6PM, 8PM, 10PM, 12AM, 2AM, 4AM
+// Hours are absolute: 6..23 for today, 24..28 for early morning the next day (12AM..4AM).
+const EARLIEST_HOURS = [6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]; // 6AM..11PM
+const LATEST_MAX = 28; // 4AM next day
 function formatHour(h) {
   const hh = ((h % 24) + 24) % 24;
   const ampm = hh >= 12 ? 'PM' : 'AM';
@@ -120,7 +121,7 @@ function labelOf(list, id) {
 }
 
 // ===== Per-user wizard sessions (in memory) =====
-// session: { userId, step, earliestIdx, latestIdx, games:Set, role, vibe, comms, squad, startedAt }
+// session: { userId, step, earliestHour, latestHour, games:Set, role, vibe, comms, squad, startedAt }
 const sessions = new Map();
 const SESSION_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
@@ -146,8 +147,8 @@ const client = new Client({
 
 // Custom IDs:
 //  daily:yes / daily:no
-//  time:set:<idx>  (during time step toggles earliest/latest)
-//  time:done
+//  time:early:<hour>   (Q1 — pick earliest)
+//  time:late:<hour>    (Q2 — pick latest)
 //  game:toggle:<idx>
 //  game:done
 //  role:<id>
@@ -164,21 +165,24 @@ function chunkButtons(buttons, perRow = 5) {
   return rows;
 }
 
-function buildTimeButtons(session) {
-  return TIME_SLOTS.map((h, idx) => {
-    let style = ButtonStyle.Secondary;
-    if (session.earliestIdx === idx && session.latestIdx === idx) style = ButtonStyle.Success;
-    else if (session.earliestIdx === idx) style = ButtonStyle.Primary;
-    else if (session.latestIdx === idx) style = ButtonStyle.Primary;
-    else if (
-      session.earliestIdx != null && session.latestIdx != null &&
-      idx > session.earliestIdx && idx < session.latestIdx
-    ) style = ButtonStyle.Success;
-    return new ButtonBuilder()
-      .setCustomId(`time:set:${idx}`)
+function buildEarliestButtons() {
+  return EARLIEST_HOURS.map((h) =>
+    new ButtonBuilder()
+      .setCustomId(`time:early:${h}`)
       .setLabel(formatHour(h))
-      .setStyle(style);
-  });
+      .setStyle(ButtonStyle.Secondary),
+  );
+}
+
+function buildLatestButtons(earliestHour) {
+  const hours = [];
+  for (let h = earliestHour + 1; h <= LATEST_MAX; h++) hours.push(h);
+  return hours.map((h) =>
+    new ButtonBuilder()
+      .setCustomId(`time:late:${h}`)
+      .setLabel(formatHour(h))
+      .setStyle(ButtonStyle.Secondary),
+  );
 }
 
 function buildGameButtons(session) {
@@ -200,19 +204,17 @@ function buildSimpleButtons(prefix, options, selected) {
 }
 
 async function sendStep(user, session) {
-  if (session.step === 'time') {
-    const rows = chunkButtons(buildTimeButtons(session), 5);
-    const doneRow = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId('time:done').setLabel('Done').setStyle(ButtonStyle.Primary),
-    );
-    const hint = session.earliestIdx == null
-      ? 'Tap your **earliest** time first, then your **latest** time.'
-      : session.latestIdx == null
-        ? `Earliest: **${formatHour(TIME_SLOTS[session.earliestIdx])}**. Now tap your **latest** time.`
-        : `Window: **${formatHour(TIME_SLOTS[session.earliestIdx])} – ${formatHour(TIME_SLOTS[session.latestIdx])}**. Press Done or change a selection.`;
+  if (session.step === 'time_early') {
+    const rows = chunkButtons(buildEarliestButtons(), 5);
     await user.send({
-      content: `**Step 1 of 6 — Time**\nWhat times are you online today?\n${hint}`,
-      components: [...rows, doneRow],
+      content: "👑 What's the earliest you might jump on today?",
+      components: rows,
+    });
+  } else if (session.step === 'time_late') {
+    const rows = chunkButtons(buildLatestButtons(session.earliestHour), 5);
+    await user.send({
+      content: "👑 And what's the latest you'd game till? (be real with yourself — work and school wait for no one 😅)",
+      components: rows,
     });
   } else if (session.step === 'games') {
     const rows = chunkButtons(buildGameButtons(session), 4);
@@ -259,8 +261,8 @@ async function sendStep(user, session) {
 }
 
 function formatSessionSummary(s) {
-  const earliest = s.earliestIdx != null ? formatHour(TIME_SLOTS[s.earliestIdx]) : '?';
-  const latest = s.latestIdx != null ? formatHour(TIME_SLOTS[s.latestIdx]) : '?';
+  const earliest = s.earliestHour != null ? formatHour(s.earliestHour) : '?';
+  const latest = s.latestHour != null ? formatHour(s.latestHour) : '?';
   const games = [...s.games].map((i) => GAMES[i]).join(', ') || '—';
   return [
     `⏰ Time: **${earliest} – ${latest}**`,
@@ -275,9 +277,9 @@ function formatSessionSummary(s) {
 async function startWizard(user) {
   sessions.set(user.id, {
     userId: user.id,
-    step: 'time',
-    earliestIdx: null,
-    latestIdx: null,
+    step: 'time_early',
+    earliestHour: null,
+    latestHour: null,
     games: new Set(),
     role: null,
     vibe: null,
@@ -509,44 +511,32 @@ client.on(Events.InteractionCreate, async (interaction) => {
       return;
     }
 
-    if (id.startsWith('time:set:')) {
-      const idx = parseInt(id.split(':')[2], 10);
-      if (session.earliestIdx == null) {
-        session.earliestIdx = idx;
-      } else if (session.latestIdx == null) {
-        if (idx < session.earliestIdx) {
-          session.latestIdx = session.earliestIdx;
-          session.earliestIdx = idx;
-        } else {
-          session.latestIdx = idx;
-        }
-      } else {
-        // Reset and start over
-        session.earliestIdx = idx;
-        session.latestIdx = null;
-      }
-      const rows = chunkButtons(buildTimeButtons(session), 5);
-      const doneRow = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('time:done').setLabel('Done').setStyle(ButtonStyle.Primary)
-          .setDisabled(session.earliestIdx == null || session.latestIdx == null),
-      );
-      const hint = session.earliestIdx == null
-        ? 'Tap your **earliest** time first, then your **latest** time.'
-        : session.latestIdx == null
-          ? `Earliest: **${formatHour(TIME_SLOTS[session.earliestIdx])}**. Now tap your **latest** time.`
-          : `Window: **${formatHour(TIME_SLOTS[session.earliestIdx])} – ${formatHour(TIME_SLOTS[session.latestIdx])}**. Press Done or tap to change.`;
+    if (id.startsWith('time:early:')) {
+      const hour = parseInt(id.split(':')[2], 10);
+      session.earliestHour = hour;
+      session.latestHour = null;
       await interaction.update({
-        content: `**Step 1 of 6 — Time**\nWhat times are you online today?\n${hint}`,
-        components: [...rows, doneRow],
+        content: `Earliest: **${formatHour(hour)}** ✅`,
+        components: [],
       });
+      advance(session, 'time_late');
+      await sendStep(interaction.user, session);
       return;
     }
-    if (id === 'time:done') {
-      if (session.earliestIdx == null || session.latestIdx == null) {
-        await interaction.reply({ content: 'Pick both an earliest and latest time first.', ephemeral: true });
+    if (id.startsWith('time:late:')) {
+      const hour = parseInt(id.split(':')[2], 10);
+      if (session.earliestHour == null || hour <= session.earliestHour) {
+        await interaction.reply({ content: 'Pick a time after your earliest.', ephemeral: true });
         return;
       }
-      await interaction.update({ content: `⏰ Time locked in: **${formatHour(TIME_SLOTS[session.earliestIdx])} – ${formatHour(TIME_SLOTS[session.latestIdx])}**`, components: [] });
+      session.latestHour = hour;
+      await interaction.update({
+        content: `Latest: **${formatHour(hour)}** ✅`,
+        components: [],
+      });
+      await interaction.user.send(
+        `Got it! You're online from **${formatHour(session.earliestHour)}** to **${formatHour(session.latestHour)}** 🎮 Let's find your squad!`,
+      );
       advance(session, 'games');
       await sendStep(interaction.user, session);
       return;
@@ -611,10 +601,10 @@ client.on(Events.InteractionCreate, async (interaction) => {
         userId: interaction.user.id,
         username: interaction.user.username,
         gamesSelected: [...session.games].map((i) => GAMES[i]),
-        earliestTime: formatHour(TIME_SLOTS[session.earliestIdx]),
-        latestTime: formatHour(TIME_SLOTS[session.latestIdx]),
-        earliestHour: TIME_SLOTS[session.earliestIdx],
-        latestHour: TIME_SLOTS[session.latestIdx],
+        earliestTime: formatHour(session.earliestHour),
+        latestTime: formatHour(session.latestHour),
+        earliestHour: session.earliestHour,
+        latestHour: session.latestHour,
         role: session.role,
         vibe: session.vibe,
         comms: session.comms,
