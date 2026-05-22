@@ -388,13 +388,22 @@ function activeEntries() {
 }
 
 // For a given game, compute maximal-overlap sessions of 2+ players.
-// Sweep-line over interval events: every point where the running set has 2+
-// players AND mutual overlap (max(earliest) <= min(latest)) defines a session.
-// We emit one session per maximal contiguous set of players that all pairwise overlap.
+//
+// "Overlap" means: there is a non-empty time window [start, end) during which
+// every player in the group is online. Equivalently, max(earliestHours) <
+// min(latestHours) across the group. We do NOT require identical or matching
+// windows — only that the windows intersect.
+//
+// Sweep-line: walk every hour boundary in the day. At each boundary t we take
+// the set of players "live at t" (earliest <= t <= latest). Any such set is
+// pairwise-overlapping by construction, with shared window
+// [max(earliests), min(latests)]. We dedupe by player-set so each maximal
+// grouping is emitted once. Players naturally appear in multiple sessions if
+// their window overlaps multiple groups (e.g. B overlaps both A and C in the
+// classic A(1-3) B(2-6) C(5-10) case → emits {A,B} 2-3 and {B,C} 5-6).
 function computeSessionsForGame(game) {
   const players = activeEntries().filter((e) => e.gamesSelected.includes(game));
   if (players.length < 2) return [];
-  // Build events: at each hour boundary, who is "live"
   const points = new Set();
   for (const p of players) { points.add(p.earliestHour); points.add(p.latestHour); }
   const sortedPts = [...points].sort((a, b) => a - b);
@@ -406,12 +415,20 @@ function computeSessionsForGame(game) {
     const sig = group.map((p) => p.userId).sort().join('|');
     if (seen.has(sig)) continue;
     seen.add(sig);
-    // group is guaranteed pairwise-overlapping (all live at t)
-    sessions.push(finalizeSession(game, group));
+    const s = finalizeSession(game, group);
+    // Reject zero-width touches (e.g. A ends 3PM, B starts 3PM): need real shared time.
+    if (s.endHour <= s.startHour) continue;
+    sessions.push(s);
   }
   // Sort largest first, then earliest start
   sessions.sort((a, b) => b.players.length - a.players.length || a.startHour - b.startHour);
   return sessions;
+}
+
+// Stable signature for a player group — used in session ids so two different
+// groups that happen to share the same start/end window don't collide.
+function playerSetSig(players) {
+  return players.map((p) => p.userId).sort().join('-').slice(0, 40);
 }
 
 function playersInAnySession(sessions) {
@@ -458,9 +475,9 @@ function buildBoardContent() {
     }
     for (const s of sessions) {
       const dot = s.confirmed ? '🟢' : '🟡';
-      lines.push(`${dot} **${game}** — Session ${formatHour(s.startHour)} → ${formatHour(s.endHour)}`);
+      lines.push(`${dot} **${game}** — 🕒 Shared window **${formatHour(s.startHour)}–${formatHour(s.endHour)}** _(when all ${s.players.length} are online together)_`);
       for (const p of s.players) {
-        lines.push(`  • <@${p.userId}> — ${labelOf(ROLES, p.role)} · ${labelOf(VIBES, p.vibe)} · ${labelOf(COMMS, p.comms)} · ${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}`);
+        lines.push(`  • <@${p.userId}> — ${labelOf(ROLES, p.role)} · ${labelOf(VIBES, p.vibe)} · ${labelOf(COMMS, p.comms)} · _online ${formatHour(p.earliestHour)}–${formatHour(p.latestHour)}_`);
       }
       lines.push(`  Roles still needed: ${s.rolesNeeded.length ? s.rolesNeeded.map((r) => labelOf(ROLES, r)).join(', ') : '_none — squad complete_'}`);
     }
@@ -535,7 +552,8 @@ function buildSessionCardContent(ls) {
   const lateLine = ls.late.length ? ls.late.map((u) => `<@${u}>`).join(' ') : '_nobody_';
   const outLine = ls.cantMake.length ? ls.cantMake.map((u) => `<@${u}>`).join(' ') : '_nobody_';
   return [
-    `👑 **Session locked in!** **${ls.game}** — Tonight **${formatHour(ls.startHour)} to ${formatHour(sessionActualEndHour(ls))}**`,
+    `👑 **Session locked in!** **${ls.game}**`,
+    `🕒 **Shared window:** **${formatHour(ls.startHour)}–${formatHour(sessionActualEndHour(ls))}** _(when everyone's online together)_`,
     `${confMentions} are all down!`,
     `**Roles:** ${roleLine}`,
     '',
@@ -595,7 +613,7 @@ async function createOrSyncSessionCards() {
     const groups = computeSessionsForGame(game);
     for (const s of groups) {
       if (s.players.length < 3) continue;
-      const id = `${data.date}:${game}:${s.startHour}-${s.endHour}`;
+      const id = `${data.date}:${game}:${s.startHour}-${s.endHour}:${playerSetSig(s.players)}`;
       let ls = boardState.liveSessions[id];
       // Allow a fell-apart session to recover if 3+ overlap again.
       if (ls && ls.fellApart && !ls.endedPosted) {
