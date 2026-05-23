@@ -1,0 +1,7 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pnpm install"
+
+[deploy]
+startCommand = "pnpm --filter @workspace/legendbot run start"
+restartPolicyType = "always"
